@@ -27,14 +27,14 @@ dp = Dispatcher()
 router = Router()
 
 # ==========================================
-# 2. БАЗА ДАННЫХ И СОСТОЯНИЯ
+# 2. БАЗА ДАННЫХ
 # ==========================================
 SUBJECTS_MAP = {
     0: "Алгебра", 1: "Геометрия", 2: "Вероятность",
     3: "Химия", 4: "Физика", 5: "Информатика"
 }
 
-# Вставь сюда свой большой FORMULA_DB из предыдущего ответа
+# Сюда я вернул твои 5 формул на каждый предмет
 FORMULA_DB = {
     0: [  # Алгебра
         {"name": "Квадратные уравнения", "theory": "Уравнение вида ax² + bx + c = 0.", "formulas": ["D = b² - 4ac", "x = (-b ± √D) / (2a)"]},
@@ -110,6 +110,22 @@ def get_main_keyboard():
         [KeyboardButton(text="📝 Список дел"), KeyboardButton(text="🤖 ИИ Поиск")]
     ], resize_keyboard=True)
 
+def get_subjects_keyboard():
+    builder = InlineKeyboardBuilder()
+    for s_id, s_name in SUBJECTS_MAP.items():
+        builder.button(text=s_name, callback_data=SubjectCB(sub_id=s_id))
+    builder.adjust(2)
+    return builder.as_markup()
+
+def get_topics_keyboard(sub_id: int):
+    builder = InlineKeyboardBuilder()
+    if sub_id in FORMULA_DB:
+        for idx, topic in enumerate(FORMULA_DB[sub_id]):
+            builder.button(text=topic["name"], callback_data=TopicCB(sub_id=sub_id, top_id=idx))
+    builder.adjust(1)
+    builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_subjects"))
+    return builder.as_markup()
+
 def get_todo_keyboard(user_id: int):
     builder = InlineKeyboardBuilder()
     tasks = user_todo.get(user_id, [])
@@ -143,8 +159,7 @@ async def ask_yandex_ai(query: str) -> str:
                     result = await resp.json()
                     return result['result']['alternatives'][0]['message']['text']
                 return f"Ошибка API: {resp.status}"
-    except:
-        return "Ошибка связи с ИИ."
+    except: return "Ошибка связи."
 
 # ==========================================
 # 5. ОБРАБОТЧИКИ
@@ -152,17 +167,38 @@ async def ask_yandex_ai(query: str) -> str:
 
 @router.message(CommandStart())
 async def cmd_start(message: Message):
-    await message.answer("Бот готов к работе!", reply_markup=get_main_keyboard())
+    await message.answer("Бот запущен и готов к работе!", reply_markup=get_main_keyboard())
 
-# --- ЛОГИКА СПИСКА ДЕЛ ---
+# --- ПРЕДМЕТЫ ---
+@router.message(F.text == "📚 Предметы")
+async def show_subjects(message: Message):
+    await message.answer("Выбери предмет из базы:", reply_markup=get_subjects_keyboard())
+
+@router.callback_query(F.data == "back_to_subjects")
+async def back_to_sub(cq: CallbackQuery):
+    await cq.message.edit_text("Выбери предмет:", reply_markup=get_subjects_keyboard())
+
+@router.callback_query(SubjectCB.filter())
+async def process_subject(cq: CallbackQuery, callback_data: SubjectCB):
+    sub_id = callback_data.sub_id
+    await cq.message.edit_text(f"Разделы ({SUBJECTS_MAP[sub_id]}):", reply_markup=get_topics_keyboard(sub_id))
+
+@router.callback_query(TopicCB.filter())
+async def process_topic(cq: CallbackQuery, callback_data: TopicCB):
+    topic = FORMULA_DB[callback_data.sub_id][callback_data.top_id]
+    text = f"📘 **Тема: {topic['name']}**\n\n📜 **Теория:**\n{topic['theory']}\n\n🔢 **Формулы:**\n" + "\n".join([f"• `{f}`" for f in topic['formulas']])
+    await cq.message.answer(text, parse_mode="Markdown")
+    await cq.answer()
+
+# --- СПИСОК ДЕЛ ---
 @router.message(F.text == "📝 Список дел")
 async def show_todo(message: Message):
-    await message.answer("Твой список дел:", reply_markup=get_todo_keyboard(message.from_user.id))
+    await message.answer("Твой To-Do лист:", reply_markup=get_todo_keyboard(message.from_user.id))
 
 @router.callback_query(F.data == "todo_add")
 async def todo_add_prompt(cq: CallbackQuery, state: FSMContext):
     await state.set_state(TodoFSM.waiting_for_task)
-    await cq.message.answer("✍️ Напиши задачу:")
+    await cq.message.answer("✍️ Напиши новую задачу:")
     await cq.answer()
 
 @router.message(TodoFSM.waiting_for_task)
@@ -170,43 +206,36 @@ async def todo_add_save(message: Message, state: FSMContext):
     uid = message.from_user.id
     user_todo.setdefault(uid, []).append({"text": message.text, "done": False})
     await state.clear()
-    await message.answer(f"✅ Задача '{message.text}' добавлена!", reply_markup=get_main_keyboard())
+    await message.answer(f"✅ Добавлено: {message.text}")
     await show_todo(message)
 
 @router.callback_query(F.data.startswith("todo_done_"))
 async def todo_toggle(cq: CallbackQuery):
-    idx = int(cq.data.split("_")[2])
-    uid = cq.from_user.id
-    if uid in user_todo and len(user_todo[uid]) > idx:
+    idx, uid = int(cq.data.split("_")[2]), cq.from_user.id
+    if uid in user_todo:
         user_todo[uid][idx]["done"] = not user_todo[uid][idx]["done"]
         await cq.message.edit_reply_markup(reply_markup=get_todo_keyboard(uid))
     await cq.answer()
 
 @router.callback_query(F.data.startswith("todo_del_"))
 async def todo_delete(cq: CallbackQuery):
-    idx = int(cq.data.split("_")[2])
-    uid = cq.from_user.id
-    if uid in user_todo and len(user_todo[uid]) > idx:
+    idx, uid = int(cq.data.split("_")[2]), cq.from_user.id
+    if uid in user_todo:
         user_todo[uid].pop(idx)
         await cq.message.edit_reply_markup(reply_markup=get_todo_keyboard(uid))
     await cq.answer()
 
-# --- ЛОГИКА РАСПИСАНИЯ ---
+# --- РАСПИСАНИЕ ---
 @router.message(F.text == "📅 Расписание")
 async def sch_start(message: Message, state: FSMContext):
     await state.set_state(ScheduleFSM.choosing_day)
-    kb = [[KeyboardButton(text=d) for d in DAYS[:4]],
-          [KeyboardButton(text=d) for d in DAYS[4:]],
-          [KeyboardButton(text="📋 Посмотреть всё"), KeyboardButton(text="Отмена")]]
-    await message.answer("Выбери день для записи или просмотри всё:", reply_markup=ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True))
+    kb = [[KeyboardButton(text=d) for d in DAYS[:4]], [KeyboardButton(text=d) for d in DAYS[4:]], [KeyboardButton(text="📋 Посмотреть всё"), KeyboardButton(text="Отмена")]]
+    await message.answer("Выбери день или нажми 'Посмотреть всё':", reply_markup=ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True))
 
 @router.message(ScheduleFSM.choosing_day, F.text == "📋 Посмотреть всё")
-async def sch_view_all(message: Message, state: FSMContext):
-    uid = message.from_user.id
-    sch = user_schedules.get(uid, {})
-    text = "🗓 **Твоё расписание:**\n\n"
-    for d in DAYS:
-        text += f"📍 **{d}**: {sch.get(d, '—')}\n"
+async def sch_view(message: Message, state: FSMContext):
+    sch = user_schedules.get(message.from_user.id, {})
+    text = "🗓 **Расписание на неделю:**\n\n" + "\n".join([f"📍 **{d}**: {sch.get(d, '—')}" for d in DAYS])
     await message.answer(text, parse_mode="Markdown", reply_markup=get_main_keyboard())
     await state.clear()
 
@@ -214,20 +243,20 @@ async def sch_view_all(message: Message, state: FSMContext):
 async def sch_day_select(message: Message, state: FSMContext):
     await state.update_data(day=message.text)
     await state.set_state(ScheduleFSM.entering_tasks)
-    await message.answer(f"📖 Что запишем на {message.text}?")
+    await message.answer(f"Что запишем на {message.text}?")
 
 @router.message(ScheduleFSM.entering_tasks)
 async def sch_save(message: Message, state: FSMContext):
     data = await state.get_data()
     user_schedules.setdefault(message.from_user.id, {})[data['day']] = message.text
     await state.clear()
-    await message.answer(f"💾 Сохранено на {data['day']}!", reply_markup=get_main_keyboard())
+    await message.answer("💾 Сохранено!", reply_markup=get_main_keyboard())
 
 # --- ИИ ПОИСК ---
 @router.message(F.text == "🤖 ИИ Поиск")
 async def ai_start(message: Message, state: FSMContext):
     await state.set_state(AiSearchFSM.waiting_for_question)
-    await message.answer("🚀 Я слушаю! Задай любой школьный вопрос:")
+    await message.answer("🚀 Режим ИИ активирован. Задай вопрос:")
 
 @router.message(AiSearchFSM.waiting_for_question)
 async def ai_proc(message: Message, state: FSMContext):
@@ -235,12 +264,13 @@ async def ai_proc(message: Message, state: FSMContext):
     ans = await ask_yandex_ai(message.text)
     await message.reply(ans, parse_mode="Markdown")
     await state.clear()
+    await message.answer("Я вернулся в обычный режим.", reply_markup=get_main_keyboard())
 
-# --- ПРЕДМЕТЫ (ВЕРНУТЬ ИЗ ТВОЕГО КОДА) ---
-@router.message(F.text == "📚 Предметы")
-async def subjects(message: Message):
-    # (Добавь сюда вызов клавиатуры предметов из прошлых этапов)
-    await message.answer("Выбери предмет (настрой клавиатуру в коде)")
+# --- ОТМЕНА ---
+@router.message(F.text == "Отмена")
+async def cancel(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer("Действие отменено.", reply_markup=get_main_keyboard())
 
 # ==========================================
 # 6. ЗАПУСК
